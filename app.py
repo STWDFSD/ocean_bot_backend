@@ -34,6 +34,7 @@ from langchain.document_loaders import PyPDFLoader
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.document_loaders import UnstructuredWordDocumentLoader
 from werkzeug.utils import secure_filename  # Use this for secure_filename
+from langchain.schema import Document
 
 
 
@@ -214,8 +215,10 @@ def train(file_key: str, file_extension: str):
         s3_client.download_file(S3_BUCKET_NAME, file_key, file_path)
 
         # Process the document based on its file extension
-        if file_extension in [".csv", ".txt"]:
-            if file_extension == ".csv":
+        if file_extension == ".pdf":
+            documents = process_document(file_path, file_extension)
+        else: 
+            if file_extension in [".csv", ".txt"]:
                 csv_data_frame = read_csv_from_s3(S3_BUCKET_NAME, file_key)
                 documents = [
                     Document(
@@ -226,8 +229,6 @@ def train(file_key: str, file_extension: str):
                 ]
             else:
                 documents = process_document(file_path, file_extension)
-        else:
-            documents = process_document(file_path, file_extension)
 
         # Initialize OpenAI Embeddings and Pinecone client
         embeddings_model = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
@@ -300,10 +301,21 @@ class TrainRequestModel(BaseModel):
 @app.post("/train")
 def apiTrain(request: TrainRequestModel):
     try:
-        file_key = request.name
+        # Decode the base64 path
+        import base64
+        try:
+            file_key = base64.b64decode(request.name).decode('utf-8')
+        except:
+            # If decoding fails, use the original path
+            file_key = request.name
+            
+        print(f"Processing file: {file_key}")
         
         # Initialize a session using Amazon S3
-        s3_client = boto3.client('s3')
+        s3_client = boto3.client('s3', 
+                                aws_access_key_id=AWS_ACCESS_KEY,
+                                aws_secret_access_key=AWS_SECRET_KEY,
+                                region_name=AWS_REGION)
 
         # Check if the file exists in the S3 bucket
         try:
@@ -316,19 +328,27 @@ def apiTrain(request: TrainRequestModel):
                 # Something else has gone wrong.
                 raise
 
-        # Read CSV data from S3
-        csv_data_frame = read_csv_from_s3(S3_BUCKET_NAME, file_key)
+        # Get file extension
+        file_extension = os.path.splitext(file_key)[1].lower()
+        
+        # Download the file locally
+        file_path = os.path.join("/tmp", secure_filename(file_key))
+        s3_client.download_file(S3_BUCKET_NAME, file_key, file_path)
 
-        # Convert DataFrame to list of Document objects with metadata
-        documents = [
-            Document(
-                content=row.to_json(),
-                metadata={
-                    'row_index': file_key
-                }
-            ) 
-            for index, row in csv_data_frame.iterrows()
-        ]
+        # Process the document based on its file extension
+        if file_extension == ".csv":
+            csv_data_frame = read_csv_from_s3(S3_BUCKET_NAME, file_key)
+            documents = [
+                Document(
+                    content=row.to_json(),
+                    metadata={
+                        'row_index': file_key
+                    }
+                ) 
+                for index, row in csv_data_frame.iterrows()
+            ]
+        else:
+            documents = process_document(file_path, file_extension)
 
         # Initialize OpenAI Embeddings
         embeddings_model = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
@@ -370,10 +390,9 @@ def apiTrain(request: TrainRequestModel):
         )
         
         return {"status": "OK"}
-
     except Exception as e:
-        return {"status": "Error", "message": str(e)}
-
+        raise HTTPException(status_code=500, detail=str(e))
+    
 # Endpoint for uploading files
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...), path: str = File(...)):
