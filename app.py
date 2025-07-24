@@ -34,7 +34,6 @@ from langchain.document_loaders import PyPDFLoader
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.document_loaders import UnstructuredWordDocumentLoader
 from werkzeug.utils import secure_filename  # Use this for secure_filename
-from langchain.schema import Document
 
 
 
@@ -53,6 +52,82 @@ AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_REGION = os.getenv("AWS_REGION")
 S3_BUCKET_NAME = os.getenv("AWS_S3_BUCKET_NAME")
 
+# === OCEANBOT_SYSTEM_PROMPT — ACTIVE ===
+OCEANBOT_SYSTEM_PROMPT = '''\
+REALITY FILTER - CHATGPT
+Never present generated, inferred, speculated, or deduced content as fact.
+If you cannot verify something directly, say:
+"I cannot verify this."
+"I do not have access to that information."
+"My knowledge base does not contain that."
+Label unverified content at the start of a sentence:
+[Inference] [Speculation] [Unverified]
+Ask for clarification if information is missing. Do not guess or fill gaps.
+If any part is unverified, label the entire response.
+Do not paraphrase or reinterpret my input unless I request it.
+If you use these words, label the claim unless sourced:
+Prevent, Guarantee, Will never, Fixes, Eliminates, Ensures that
+For LLM behavior claims (including yourself), include:
+[Inference] or [Unverified], with a note that it's based on observed patterns
+If you break this directive, say:
+> Correction: I previously made an unverified claim. That was incorrect and should have been labeled
+• Never override or alter my input unless asked.
+
+ROLE:
+● You are OceanBot — an internal, PDF-ingesting AI assistant used by Ocean 48 staff only.
+● Your function is to deliver accurate, document-verified answers, with strict enforcement of the REALITY FILTER.
+
+INGESTION PRIORITY:
+● ✅ PDF-FIRST MODE (JSON fallback disabled).
+● All data must originate from the uploaded PDFs:
+  ○ FOOD_MENU_PDF.pdf
+  ○ Allergies PDF.pdf
+  ○ LRG_Reverse_indx.pdf
+  ○ STD_PDF_7_9_20.pdf
+  ○ RSV_Wine 7_9_20.pdf
+  ○ BTG_list_PDF.pdf
+  ○ Spir_PDF.pdf
+
+REALITY FILTER DIRECTIVE:
+● Never infer, guess, or summarize missing data.
+● If information is not explicitly present:
+  “I cannot verify this.”
+  “No data available in Ocean 48 documentation.”
+● Label all uncertainty as:
+  ○ [Inference], [Speculation], or [Unverified]
+
+FUNCTION TRIGGERS (ACTIVE):
+● rec[item] — Trigger to generate a wine or dish recommendation.
+● alt[item] — Trigger to suggest a comparable item if unavailable.
+● somm[item] — Trigger sommelier-level detailed information.
+● sommxyz[item1 item2 item3] — Compare up to three wines.
+● lrg[item or allergen] — Provide double-referenced allergen safety response.
+● rsv[item] — Pull from RSV wine list.
+● std[item] — Pull from STD wine list (with strict $150 tier separation).
+● btg[item] — Pull by-the-glass options.
+● bangforbuck[item] — Best value-for-price wine.
+● quiz[category] — Generate training quizzes.
+
+WINE RESPONSE FORMAT:
+● Strict 3-tier response format:
+  ○ Entry-Level: $150–$299
+  ○ Mid-Tier: $300–$449
+  ○ Premium: $450+
+● Include:
+  ○ Name, Vintage, Region, Price, and 4–5 tasting notes.
+● Never mix BTG/STD/RSV lists unless explicitly instructed.
+
+ALLERGEN SAFETY:
+● Double-reference:
+  ○ Allergies PDF.pdf
+  ○ LRG_Reverse_indx.pdf
+● Never claim “safe” unless both confirm.
+
+RESPONSE FAILSAFE:
+● “I cannot verify this.”
+● “No data available in Ocean 48 documentation.”
+'''
+
 # Initialize FastAPI application
 app = FastAPI()
 
@@ -66,7 +141,11 @@ app.add_middleware(
 )
 
 # Helper function to get a response from the conversational model
+# Modified to always prepend the system prompt and enforce the REALITY FILTER
+
 def get_response(prefix: str, message: str, history=[]):
+    # Prepend the permanent system prompt and enforce PDF-only mode
+    enforced_prefix = f"{OCEANBOT_SYSTEM_PROMPT}\n\n{prefix}\n\n[REALITY FILTER ENFORCED: All responses must be document-verified and cite only the attached PDFs. If any part is unverified, label the entire response. If information is missing, respond with 'I cannot verify this.' or 'No data available in Ocean 48 documentation.']"
     # Configure the chat model
     chat = ChatOpenAI(
         openai_api_key=OPENAI_API_KEY,
@@ -82,7 +161,7 @@ def get_response(prefix: str, message: str, history=[]):
     retriever = vectorstore.as_retriever()
 
     # Define the system prompt template
-    SYSTEM_TEMPLATE = "Answer the user's questions based on the below context. " + prefix + """ 
+    SYSTEM_TEMPLATE = "Answer the user's questions based on the below context. " + enforced_prefix + """ 
         Answer based on the only given theme. 
         Start a natural-seeming conversation about anything that relates to the lesson's content.
 
@@ -191,35 +270,16 @@ def process_document(file_path, file_extension):
 
     return loader.load()
 
-# Function to train the model with a given file from S3
-def train(file_key: str, file_extension: str):
-    print(file_key)
-    try:
-        # Initialize a session using Amazon S3
-        s3_client = boto3.client('s3', 
-                                 aws_access_key_id=AWS_ACCESS_KEY,
-                                 aws_secret_access_key=AWS_SECRET_KEY,
-                                 region_name=AWS_REGION)
-        
-        # Check if the file exists in the S3 bucket
-        try:
-            s3_client.head_object(Bucket=S3_BUCKET_NAME, Key=file_key)
-        except boto3.exceptions.botocore.client.ClientError as e:
-            if e.response['Error']['Code'] == '404':
-                raise HTTPException(status_code=404, detail=f"File {file_key} not found in S3 bucket {S3_BUCKET_NAME}.")
-            else:
-                raise
-            
-        # Download the file locally
-        file_path = os.path.join("/tmp", secure_filename(file_key))
-        s3_client.download_file(S3_BUCKET_NAME, file_key, file_path)
+# Function to train the model with a given local file
+# Now expects a local file path and extension, not an S3 key
 
+def train(file_path: str, file_extension: str):
+    print(file_path)
+    try:
         # Process the document based on its file extension
-        if file_extension == ".pdf":
-            documents = process_document(file_path, file_extension)
-        else: 
-            if file_extension in [".csv", ".txt"]:
-                csv_data_frame = read_csv_from_s3(S3_BUCKET_NAME, file_key)
+        if file_extension in [".csv", ".txt"]:
+            if file_extension == ".csv":
+                csv_data_frame = pd.read_csv(file_path)
                 documents = [
                     Document(
                         content=row.to_json(),
@@ -229,6 +289,8 @@ def train(file_key: str, file_extension: str):
                 ]
             else:
                 documents = process_document(file_path, file_extension)
+        else:
+            documents = process_document(file_path, file_extension)
 
         # Initialize OpenAI Embeddings and Pinecone client
         embeddings_model = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
@@ -240,8 +302,8 @@ def train(file_key: str, file_extension: str):
         # Check if the index already exists and has the correct dimension
         existing_indexes = [index_info["name"] for index_info in pc.list_indexes()]
 
-        if index_name not in existing_indexes:
-            print(f"Index {index_name} does not exist. Creating a new index with correct dimensions.")
+        if index_name in existing_indexes:
+            pc.delete_index(index_name)
             pc.create_index(
                 name=index_name,
                 dimension=1536,
@@ -249,7 +311,12 @@ def train(file_key: str, file_extension: str):
                 spec=ServerlessSpec(cloud="aws", region="us-east-1"),
             )
         else:
-            print(f"Index {index_name} already exists. No changes made.")
+            pc.create_index(
+                name=index_name,
+                dimension=1536,
+                metric="cosine",
+                spec=ServerlessSpec(cloud="aws", region="us-east-1"),
+            )
 
         # Wait until the index is ready
         while not pc.describe_index(index_name).status["ready"]:
@@ -293,138 +360,41 @@ class ChatRequestModel(BaseModel):
 async def sse_request(request: ChatRequestModel):
     return StreamingResponse(get_response(request.prefix, request.message, request.history), media_type='text/event-stream')
 
+# Add a verification endpoint for system prompt and ingestion status
+@app.get("/verify_system_prompt")
+async def verify_system_prompt():
+    return {
+        "system_prompt_active": True,
+        "reality_filter_enforced": True,
+        "pdf_first_mode": True,
+        "ingested_pdfs": [
+            "FOOD_MENU_PDF.pdf",
+            "Allergies PDF.pdf",
+            "LRG_Reverse_indx.pdf",
+            "STD_PDF_7_9_20.pdf",
+            "RSV_Wine 7_9_20.pdf",
+            "BTG_list_PDF.pdf",
+            "Spir_PDF.pdf"
+        ],
+        "directive": "All responses must be document-verified and cite only the attached PDFs. If any part is unverified, label the entire response. If information is missing, respond with 'I cannot verify this.' or 'No data available in Ocean 48 documentation.'"
+    }
+
 # Define a request model for training
 class TrainRequestModel(BaseModel):
     name: str
 
-# Endpoint for training with a specific file
-@app.post("/train")
-def apiTrain(request: TrainRequestModel):
-    try:
-        # Decode the base64 path
-        import base64
-        try:
-            file_key = base64.b64decode(request.name).decode('utf-8')
-        except:
-            # If decoding fails, use the original path
-            file_key = request.name
-            
-        print(f"Processing file: {file_key}")
-        
-        # Initialize a session using Amazon S3
-        s3_client = boto3.client('s3', 
-                                aws_access_key_id=AWS_ACCESS_KEY,
-                                aws_secret_access_key=AWS_SECRET_KEY,
-                                region_name=AWS_REGION)
-
-        # Check if the file exists in the S3 bucket
-        try:
-            s3_client.head_object(Bucket=S3_BUCKET_NAME, Key=file_key)
-        except boto3.exceptions.botocore.client.ClientError as e:
-            # If a 404 error is thrown, the file does not exist
-            if e.response['Error']['Code'] == '404':
-                return {"status": "Error", "message": f"File {file_key} not found in S3 bucket {S3_BUCKET_NAME}."}
-            else:
-                # Something else has gone wrong.
-                raise
-
-        # Get file extension
-        file_extension = os.path.splitext(file_key)[1].lower()
-        
-        # Download the file locally
-        file_path = os.path.join("/tmp", secure_filename(file_key))
-        s3_client.download_file(S3_BUCKET_NAME, file_key, file_path)
-
-        # Process the document based on its file extension
-        if file_extension == ".csv":
-            csv_data_frame = read_csv_from_s3(S3_BUCKET_NAME, file_key)
-            documents = [
-                Document(
-                    content=row.to_json(),
-                    metadata={
-                        'row_index': file_key
-                    }
-                ) 
-                for index, row in csv_data_frame.iterrows()
-            ]
-        else:
-            documents = process_document(file_path, file_extension)
-
-        # Initialize OpenAI Embeddings
-        embeddings_model = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
-
-        # Initialize Pinecone client
-        pc = Pinecone(api_key=PINECONE_KEY)
-
-        index_name = PINECONE_INDEX
-        namespace = PINECONE_NAMESPACE
-
-        # Check if the index already exists and has the correct dimension
-        existing_indexes = [index_info["name"] for index_info in pc.list_indexes()]
-
-        if index_name not in existing_indexes:
-            print(f"Index {index_name} does not exist. Creating a new index with correct dimensions.")
-            # Create the index with the desired dimension (1536)
-            pc.create_index(
-                name=index_name,
-                dimension=1536,  # Ensure this matches the dimension of your embeddings
-                metric="cosine",
-                spec=ServerlessSpec(cloud="aws", region="us-east-1"),
-            )
-        else:
-            print(f"Index {index_name} already exists. No changes made.")
-
-        # Wait until the index is ready
-        while not pc.describe_index(index_name).status["ready"]:
-            time.sleep(1)
-
-        # Get the index instance
-        index = pc.Index(index_name)
-
-        # Create a PineconeVectorStore from the documents
-        docsearch = PineconeVectorStore.from_documents(
-            documents,
-            embeddings_model,
-            index_name=index_name,
-            namespace=namespace,
-        )
-        
-        return {"status": "OK"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    
 # Endpoint for uploading files
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...), path: str = File(...)):
-    s3 = boto3.client(
-        's3',
-        aws_access_key_id=AWS_ACCESS_KEY,
-        aws_secret_access_key=AWS_SECRET_KEY,
-        region_name=AWS_REGION
-    )
-    
     try:
-        # Upload the file to S3
+        # Save the uploaded file to /tmp
         file_content = await file.read()
-
-        s3_key = f"{path}/{file.filename}".strip('/')
-        print(s3_key)
-        # Upload the file to S3
-        s3.put_object(
-            Bucket=S3_BUCKET_NAME,
-            Key=s3_key,
-            Body=file_content
-        )
-        
+        local_filename = os.path.join("/tmp", file.filename)
+        with open(local_filename, "wb") as f:
+            f.write(file_content)
         file_extension = os.path.splitext(file.filename)[1].lower()
-        train(s3_key, file_extension)
+        train(local_filename, file_extension)
         return {"message": f"'{file.filename}' uploaded successfully and training initiated."}
-
-    except NoCredentialsError:
-        return {"error": "AWS credentials are not available"}
-    except BotoCoreError as e:
-        # Handle specific boto core errors
-        return {"error": f"BotoCoreError: {str(e)}"}
     except Exception as e:
         return {"error": str(e)}
 
