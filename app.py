@@ -203,50 +203,17 @@ FUNCTION TRIGGERS & RESPONSE FORMATS:
   10. What are the key allergens in the Maryland-style Crab Cakes, including sauce components?
   Let me know if you want the answers, a version for print, or a quiz for sides/desserts next."
 
-● Lrg: Utilizing menu abbreviations, provides specific allergy-related information from Allergies PDF.pdf and LRG_Reverse_indx.pdf, including verified ingredients, potential cross-contaminations, and disclaimers. Always cross-reference both PDFs and state if information is incomplete. Trigger: "lrg [allergen or dish]".
+● Lrg: Quick allergen check using menu abbreviations from Allergies PDF.pdf and LRG_Reverse_indx.pdf. Provides brief allergen list and cross-reference status. For detailed breakdown, use "911 lrg". Trigger: "lrg [allergen or dish]".
   Example prompt: "lrg stripe"
   Ideal response format:
-  "✅ lrg[STRIPE] — Allergen Verification
-  (Strictly verified using FOOD_MENU_PDF.pdf, Allergies PDF.pdf, and LRG_Reverse_indx.pdf)
+  "✅ lrg[STRIPE] — Quick Allergen Check
+  (Cross-referenced: Allergies PDF.pdf + LRG_Reverse_indx.pdf)
   🐟
-  Dish:
-  Striped Bass + King Crab
-  Abbreviation: STRIPE
-  Portion: 14 oz striped bass filet + 3 oz king crab merus meat
-  🔪
-  Preparation:
-  ● Striped bass is seasoned with House Steak Rub
-  ● Drizzled with clarified butter and white wine
-  ● Seared and baked
-  ● Topped with king crab merus meat and lemon butter sauce
-  🧂
-  Key Component Review:
-  🟫
-  House Steak Rub:
-  ● Paprika
-  ● Garlic powder
-  ● Onion powder
-  ⚠️ Allergens: Garlic, Onion
-  🟨
-  Lemon Butter Sauce:
-  ● Lemon juice
-  ● Butter
-  ● Garlic
-  ● Shallots
-  ● White wine
-  ⚠️ Allergens: Dairy, Garlic, Onion
-  🦀
-  King Crab Merus Meat:
-  ⚠️ Allergen: Shellfish
+  Dish: Striped Bass + King Crab (STRIPE)
   ⚠️
-  Confirmed Allergens (from both PDFs):
-  ● Dairy
-  ● Shellfish
-  ● Fish
-  ● Garlic
-  ● Onion
-  ✅ All five allergens are cross-confirmed in both Allergies PDF.pdf and LRG_Reverse_indx.pdf.
-  Let me know if you'd like to explore rub-free or sauce-free versions for allergy-sensitive guests."
+  Allergens: Dairy, Shellfish, Fish, Garlic, Onion
+  ✅ Verified in both PDFs
+  💡 For detailed breakdown: "911 lrg stripe""
 
 ● Rsv: Calls a reserve wine list recommendation from RSV_Wine_7_9_20, providing 4 different wines: 3 from the standard reserve list and 1 from the large format list, in multi-tiered pricing from lowest to highest with each category no less than $200 apart. Uses the 3-tier format, including tasting notes. Trigger: "rsv [dish or type]".
   Example prompt: "rec rsv napa cab pair with dryrib"
@@ -555,7 +522,7 @@ app.add_middleware(
 # Helper function to get a response from the conversational model
 # Modified to always prepend the system prompt and enforce the REALITY FILTER
 
-def get_response(prefix: str, message: str, history=[]):
+def get_response(prefix: str, message: str):
     # Prepend the permanent system prompt and enforce PDF-only mode
     enforced_prefix = f"{OCEANBOT_SYSTEM_PROMPT}\n\n{prefix}\n\n[REALITY FILTER ENFORCED: All responses must be document-verified and cite only the attached PDFs. If any part is unverified, label the entire response. If information is missing, respond with 'I cannot verify this.' or 'No data available in Ocean 48 documentation.']"
     # Configure the chat model
@@ -625,11 +592,11 @@ def get_response(prefix: str, message: str, history=[]):
     messages = []
 
     # Populate message history
-    for item in history:
-        if item.role == "user":
-            messages.append(HumanMessage(content=item.content))
-        else:
-            messages.append(AIMessage(content=item.content))
+    # for item in history:
+    #     if item.role == "user":
+    #         messages.append(HumanMessage(content=item.content))
+    #     else:
+    #         messages.append(AIMessage(content=item.content))
             
     stream = conversational_retrieval_chain.stream(
         {
@@ -1065,12 +1032,12 @@ class Item(BaseModel):
 class ChatRequestModel(BaseModel):
     prefix: str
     message: str
-    history: List[Item]
+    # history: List[Item]
 
 # Endpoint for chat interactions
 @app.post("/chat")
 async def sse_request(request: ChatRequestModel):
-    return StreamingResponse(get_response(request.prefix, request.message, request.history), media_type='text/event-stream')
+    return StreamingResponse(get_response(request.prefix, request.message), media_type='text/event-stream')
 
 # Add a verification endpoint for system prompt and ingestion status
 # @app.get("/verify_system_prompt")
